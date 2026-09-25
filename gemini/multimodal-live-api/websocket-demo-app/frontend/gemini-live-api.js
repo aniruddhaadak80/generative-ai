@@ -66,11 +66,19 @@ class GeminiLiveAPI {
     }
 
     disconnect() {
-        this.webSocket.close();
+        if (!this.websocket) {
+            return;
+        }
+        const websocket = this.websocket;
+        this.websocket = null;
+        websocket.close();
     }
 
     sendMessage(message) {
-        this.webSocket.send(JSON.stringify(message));
+        if (!this.websocket) {
+            return;
+        }
+        this.websocket.send(JSON.stringify(message));
     }
 
     onReceiveMessage(messageEvent) {
@@ -84,25 +92,25 @@ class GeminiLiveAPI {
     setupWebSocketToService() {
         console.log("connecting: ", this.proxyUrl);
 
-        this.webSocket = new WebSocket(this.proxyUrl);
+        this.websocket = new WebSocket(this.proxyUrl);
 
-        this.webSocket.onclose = (event) => {
+        this.websocket.onclose = (event) => {
             console.log("websocket closed: ", event);
             this.onErrorMessage("Connection closed");
         };
 
-        this.webSocket.onerror = (event) => {
+        this.websocket.onerror = (event) => {
             console.log("websocket error: ", event);
             this.onErrorMessage("Connection error");
         };
 
-        this.webSocket.onopen = (event) => {
+        this.websocket.onopen = (event) => {
             console.log("websocket open: ", event);
             this.sendInitialSetupMessages();
             this.onConnectionStarted();
         };
 
-        this.webSocket.onmessage = this.onReceiveMessage.bind(this);
+        this.websocket.onmessage = this.onReceiveMessage.bind(this);
     }
 
     sendInitialSetupMessages() {
