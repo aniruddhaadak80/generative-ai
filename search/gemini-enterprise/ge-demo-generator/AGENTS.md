@@ -550,6 +550,13 @@ merge; a stale `TEMPLATE_REPO` keeps every generated script pointed at the fork.
   user can see, so its guards are covered off-line (see section 2.6).
 - `python3 test_surface_registry_persist.py` — simulates an instance recycle
   and checks the surfaceId anchors survive it (see section 10.3).
+- `python3 test_scheduler_timezone.py` — the zone a schedule fires in. A
+  cron expression carries none of its own, so the job's own `time_zone`
+  decides what "02:00" means. The gate slices the three scheduling tools
+  out of both trees that hold a copy (section 14.1) and runs them against
+  a stubbed Firestore and a stubbed scheduler client, so a hard-coded
+  zone, or one the update mask never sends, fails here instead of in
+  someone's demo.
 - `python3 test_register_fallback.py` — slices the authorization read-back gate
   and `register_ge_agent_with_fallback` out of `app/Code.gs` and runs them under
   `bash -e` against a stubbed `curl` and a stubbed `register_agent.py`. The only
