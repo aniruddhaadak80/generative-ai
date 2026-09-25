@@ -2548,10 +2548,10 @@ IMMEDIATE TASKS:
 - cancel_background_task: Cancel a pending/running task.
 
 SCHEDULED TASKS:
-- register_scheduled_task: Register a recurring task with cron schedule.
-- update_scheduled_task: Change the cron schedule of an existing task.
+- register_scheduled_task: Register a recurring task with cron schedule and IANA time zone.
+- update_scheduled_task: Change the cron schedule or IANA time zone of an existing task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
-- register_scheduled_autonomous_task: Register a RECURRING schedule for
+- register_scheduled_autonomous_task: Register a RECURRING schedule with an IANA time zone for
   AUTONOMOUS sandbox work (web research, file deliverables, Workspace
   actions). Fires even while the user is offline; each fire creates an
   autonomous ticket whose progress and completion are announced
@@ -3116,7 +3116,7 @@ SCHEDULED TASKS:
   The task runs via Cloud Scheduler at the specified intervals.
 - update_scheduled_task: Change the cron schedule of an existing scheduled task.
 - delete_scheduled_task: Remove a scheduled task and its Cloud Scheduler job.
-- register_scheduled_autonomous_task: Register a RECURRING schedule for
+- register_scheduled_autonomous_task: Register a RECURRING schedule with an IANA time zone for
   AUTONOMOUS sandbox work (web research, file deliverables, Workspace
   actions). Fires even while the user is offline; results are announced
   automatically on the user's next message.

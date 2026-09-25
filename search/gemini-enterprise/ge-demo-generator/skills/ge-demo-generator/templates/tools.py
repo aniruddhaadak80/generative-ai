@@ -2518,12 +2518,17 @@ def update_task_progress(
     except Exception as _fs_err:
         return {"error": "Firestore update failed: " + str(_fs_err)[:200]}
 
+def _normalize_scheduler_time_zone(time_zone: str) -> str:
+    return (time_zone or "UTC").strip() or "UTC"
+
+
 def register_scheduled_task(
     task_name: str,
     task_description: str,
     task_prompt: str,
     schedule_cron: str,
     tool_context: ToolContext,
+    time_zone: str = "UTC",
 ) -> dict:
     """Registers a new scheduled task with automatic Cloud Scheduler job creation.
 
@@ -2532,11 +2537,13 @@ def register_scheduled_task(
         task_description: What the task does.
         task_prompt: Detailed instruction for each execution.
         schedule_cron: Cron expression (e.g. '0 9 * * 1-5' for weekdays 9am).
+        time_zone: IANA time zone for the schedule (e.g. 'America/Los_Angeles'). Defaults to UTC.
 
     Returns:
-        dict with task_id, schedule, and job_name.
+        dict with task_id, schedule, time_zone, and job_name.
     """
     import builtins, json as _json, logging as _logging
+    time_zone = _normalize_scheduler_time_zone(time_zone)
     _fs = getattr(builtins, '_firestore_client', None)
     _demo_id = os.environ.get("DEMO_ID", "")
     _project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -2554,6 +2561,7 @@ def register_scheduled_task(
         "task_prompt": task_prompt,
         "task_type": "scheduled",
         "schedule_cron": schedule_cron,
+        "time_zone": time_zone,
         "created_at": _now,
     }
     if _fs and _demo_id:
@@ -2587,7 +2595,7 @@ def register_scheduled_task(
         _job = scheduler_v1.Job(
             name=_parent + "/jobs/" + _job_id,
             schedule=schedule_cron,
-            time_zone="Asia/Tokyo",
+            time_zone=time_zone,
             pubsub_target=scheduler_v1.PubsubTarget(
                 topic_name=_topic_path,
                 data=_payload,
@@ -2609,8 +2617,9 @@ def register_scheduled_task(
         "task_id": _task_id,
         "task_name": task_name,
         "schedule": schedule_cron,
+        "time_zone": time_zone,
         "job_name": _job_name,
-        "message": "Scheduled task registered. Will execute at: " + schedule_cron,
+        "message": "Scheduled task registered. Will execute at: " + schedule_cron + " (" + time_zone + ")",
     }
 
 
@@ -2618,15 +2627,17 @@ def update_scheduled_task(
     task_id: str,
     schedule_cron: str,
     tool_context: ToolContext,
+    time_zone: str = "",
 ) -> dict:
     """Updates the schedule of an existing scheduled task.
 
     Args:
         task_id: The task_id of the scheduled task to update.
         schedule_cron: New cron expression (e.g. '0 18 * * 1-5' for weekdays 6pm).
+        time_zone: New IANA time zone for the schedule (e.g. 'America/Los_Angeles'). Keeps the existing time zone when omitted.
 
     Returns:
-        dict with updated schedule info.
+        dict with updated schedule and time_zone info.
     """
     import builtins, logging as _logging
     _fs = getattr(builtins, '_firestore_client', None)
@@ -2648,7 +2659,10 @@ def update_scheduled_task(
     if _def_data.get("task_type") != "scheduled":
         return {"error": "Task is not a scheduled task"}
 
-    _def_ref.update({"schedule_cron": schedule_cron})
+    if not time_zone:
+        time_zone = _def_data.get("time_zone") or "UTC"
+    time_zone = _normalize_scheduler_time_zone(time_zone)
+    _def_ref.update({"schedule_cron": schedule_cron, "time_zone": time_zone})
 
     # Update Cloud Scheduler job
     _job_id = _demo_id + "-sched-" + task_id
@@ -2657,14 +2671,15 @@ def update_scheduled_task(
         from google.protobuf import field_mask_pb2
         _client = scheduler_v1.CloudSchedulerClient()
         _job_name = "projects/" + _project_id + "/locations/" + _region + "/jobs/" + _job_id
-        _job = scheduler_v1.Job(name=_job_name, schedule=schedule_cron)
-        _mask = field_mask_pb2.FieldMask(paths=["schedule"])
+        _job = scheduler_v1.Job(name=_job_name, schedule=schedule_cron, time_zone=time_zone)
+        _mask = field_mask_pb2.FieldMask(paths=["schedule", "time_zone"])
         _updated = _client.update_job(job=_job, update_mask=_mask)
         _logging.warning("Updated scheduler job: " + _updated.name + " -> " + schedule_cron)
         return {
             "status": "updated",
             "task_id": task_id,
             "new_schedule": schedule_cron,
+            "new_time_zone": time_zone,
             "job_name": _updated.name,
         }
     except Exception as _e:
@@ -4277,6 +4292,7 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
         schedule_cron: str,
         input_data: str = "",
         tool_context: ToolContext = None,
+        time_zone: str = "UTC",
     ) -> dict:
         """Registers a RECURRING schedule that automatically delegates a task to
         the fully autonomous cloud sandbox agent at the given cron times - even
@@ -4299,13 +4315,15 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             task_description: COMPLETE, self-contained instruction in the USER'S
                 language - same rules as delegate_autonomous_task: describe
                 OUTCOMES only, never this agent's own tool names.
-            schedule_cron: Cron expression, Asia/Tokyo timezone (e.g. '0 8 * * 1-5').
+            schedule_cron: Cron expression (e.g. '0 8 * * 1-5').
             input_data: Optional data to embed verbatim into every fire.
+            time_zone: IANA time zone for the schedule (e.g. 'America/Los_Angeles'). Defaults to UTC.
 
         Returns:
-            dict with schedule_id, schedule, and job_name.
+            dict with schedule_id, schedule, time_zone, and job_name.
         """
         import builtins, json as _json, logging as _logging
+        time_zone = _normalize_scheduler_time_zone(time_zone)
         if not _MANAGED_AGENT_ID:
             return {"status": "unavailable",
                     "message": "The autonomous agent is not provisioned in this project, so autonomous "
@@ -4331,6 +4349,7 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             "input_data": input_data,
             "task_type": "scheduled_autonomous",
             "schedule_cron": schedule_cron,
+            "time_zone": time_zone,
             "created_at": _now,
         })
         # The schedule's own execution doc stays status 'scheduled'; per-fire
@@ -4358,7 +4377,7 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             _job = scheduler_v1.Job(
                 name=_parent + "/jobs/" + _job_id,
                 schedule=schedule_cron,
-                time_zone="Asia/Tokyo",
+                time_zone=time_zone,
                 pubsub_target=scheduler_v1.PubsubTarget(topic_name=_topic_path, data=_payload),
             )
             _created = _sched_client.create_job(parent=_parent, job=_job)
@@ -4373,8 +4392,9 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             "schedule_id": _sched_id,
             "task_name": task_name,
             "schedule": schedule_cron,
+            "time_zone": time_zone,
             "job_name": _job_name,
-            "message": "Autonomous schedule registered (timezone Asia/Tokyo). Each fire runs in the sandbox "
+            "message": "Autonomous schedule registered (timezone " + time_zone + "). Each fire runs in the sandbox "
                        "even while the user is offline; progress and completion are announced automatically "
                        "on the user's next message. Tell the user this, including the schedule in plain words.",
         }
