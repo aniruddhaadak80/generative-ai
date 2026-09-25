@@ -2497,12 +2497,66 @@ def update_task_progress(
     except Exception as _fs_err:
         return {"error": "Firestore update failed: " + str(_fs_err)[:200]}
 
+# Cloud Scheduler defaults a job with no timeZone to UTC, and rejects a job
+# whose timeZone is not a valid IANA name. The failure worth avoiding is the
+# quiet one: a demo asked to "run every day at 02:00 PST" must not end up with
+# a job that fires at some other local hour. So the zone is a parameter, it is
+# checked against the IANA database, and the caller's value is what reaches the
+# API instead of a constant baked into the template.
+_SCHED_DEFAULT_TIME_ZONE = "UTC"
+
+
+def _resolve_schedule_time_zone(time_zone: str = "") -> str:
+    """Validates an IANA time zone name for a Cloud Scheduler job.
+
+    Args:
+        time_zone: IANA time zone name, e.g. 'America/Los_Angeles' for US
+            Pacific. Blank resolves to the UTC default.
+
+    Returns:
+        A time zone name Cloud Scheduler will accept, or the caller's value
+        unchanged when this runtime has no IANA database to check it against.
+
+    Raises:
+        ValueError: if the name cannot be an IANA zone. The message is written
+            for the model that called the tool, so it can correct the call
+            rather than register a job at the wrong hour.
+    """
+    import zoneinfo as _zoneinfo
+    _tz = str(time_zone or "").strip()
+    if not _tz:
+        return _SCHED_DEFAULT_TIME_ZONE
+    try:
+        _zoneinfo.ZoneInfo(_tz)
+    except _zoneinfo.ZoneInfoNotFoundError:
+        # A slim container image can ship without an IANA database, and then
+        # EVERY name fails, valid ones included. Only reject here while a known
+        # zone is still resolvable, so a missing database degrades to letting
+        # Cloud Scheduler be the authority instead of breaking all scheduling.
+        try:
+            _zoneinfo.ZoneInfo(_SCHED_DEFAULT_TIME_ZONE)
+        except _zoneinfo.ZoneInfoNotFoundError:
+            return _tz
+        raise ValueError(
+            "Unknown time zone " + repr(_tz) + " - pass an IANA time zone name such as "
+            "'America/Los_Angeles' for US Pacific, 'Europe/Berlin' or 'UTC'."
+        )
+    except ValueError:
+        # ZoneInfo refuses any key that is not a normalized relative path, which
+        # also stops an absolute path from ever reaching the API.
+        raise ValueError(
+            "Invalid time zone " + repr(_tz) + " - pass an IANA time zone name such as "
+            "'America/los_angeles' for US Pacific, 'Europe/Berlin' or 'UTC'."
+        )
+    return _tz
+
 def register_scheduled_task(
     task_name: str,
     task_description: str,
     task_prompt: str,
     schedule_cron: str,
-    tool_context: ToolContext,
+    time_zone: str = "",
+    tool_context: ToolContext = None,
 ) -> dict:
     """Registers a new scheduled task with automatic Cloud Scheduler job creation.
 
@@ -2511,11 +2565,21 @@ def register_scheduled_task(
         task_description: What the task does.
         task_prompt: Detailed instruction for each execution.
         schedule_cron: Cron expression (e.g. '0 9 * * 1-5' for weekdays 9am).
+        time_zone: IANA time zone the cron expression is evaluated in, e.g.
+            'America/Los_Angeles' when the user asked for 9am PST. Resolve the
+            user's zone to an IANA name before calling this - a raw abbreviation
+            is rejected. Leave blank for UTC.
 
     Returns:
         dict with task_id, schedule, and job_name.
     """
     import builtins, json as _json, logging as _logging
+    try:
+        _tz = _resolve_schedule_time_zone(time_zone)
+    except ValueError as _tz_err:
+        # Resolved BEFORE the Firestore write, so a zone Cloud Scheduler would
+        # reject never leaves a half-registered task definition behind.
+        return {"status": "error", "message": str(_tz_err) + " The task was not registered."}
     _fs = getattr(builtins, '_firestore_client', None)
     _demo_id = os.environ.get("DEMO_ID", "")
     _project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -2533,6 +2597,7 @@ def register_scheduled_task(
         "task_prompt": task_prompt,
         "task_type": "scheduled",
         "schedule_cron": schedule_cron,
+        "time_zone": _tz,
         "created_at": _now,
     }
     if _fs and _demo_id:
@@ -2566,7 +2631,7 @@ def register_scheduled_task(
         _job = scheduler_v1.Job(
             name=_parent + "/jobs/" + _job_id,
             schedule=schedule_cron,
-            time_zone="Asia/Tokyo",
+            time_zone=_tz,
             pubsub_target=scheduler_v1.PubsubTarget(
                 topic_name=_topic_path,
                 data=_payload,
@@ -2574,7 +2639,7 @@ def register_scheduled_task(
         )
         _created = _sched_client.create_job(parent=_parent, job=_job)
         _job_name = _created.name
-        _logging.warning("Created Cloud Scheduler job: " + _job_name)
+        _logging.warning("Created Cloud Scheduler job (" + _tz + "): " + _job_name)
     except Exception as _e:
         _logging.error("Failed to create scheduler job: " + str(_e))
         return {
@@ -2588,8 +2653,10 @@ def register_scheduled_task(
         "task_id": _task_id,
         "task_name": task_name,
         "schedule": schedule_cron,
+        "time_zone": _tz,
         "job_name": _job_name,
-        "message": "Scheduled task registered. Will execute at: " + schedule_cron,
+        "message": "Scheduled task registered. Will execute at: " + schedule_cron
+                   + " (" + _tz + " time).",
     }
 
 
@@ -4255,6 +4322,7 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
         task_description: str,
         schedule_cron: str,
         input_data: str = "",
+        time_zone: str = "",
         tool_context: ToolContext = None,
     ) -> dict:
         """Registers a RECURRING schedule that automatically delegates a task to
@@ -4278,13 +4346,23 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             task_description: COMPLETE, self-contained instruction in the USER'S
                 language - same rules as delegate_autonomous_task: describe
                 OUTCOMES only, never this agent's own tool names.
-            schedule_cron: Cron expression, Asia/Tokyo timezone (e.g. '0 8 * * 1-5').
+            schedule_cron: Cron expression (e.g. '0 8 * * 1-5').
+            time_zone: IANA time zone the cron expression is evaluated in, e.g.
+                'America/Los_Angeles' when the user asked for 8am PST. Resolve
+                the user's zone to an IANA name before calling this; leave blank
+                for UTC.
             input_data: Optional data to embed verbatim into every fire.
 
         Returns:
             dict with schedule_id, schedule, and job_name.
         """
         import builtins, json as _json, logging as _logging
+        try:
+            _tz = _resolve_schedule_time_zone(time_zone)
+        except ValueError as _tz_err:
+            # Resolved BEFORE the Firestore write, so a rejected zone never
+            # leaves a half-registered schedule behind.
+            return {"status": "error", "message": str(_tz_err) + " The schedule was not registered."}
         if not _MANAGED_AGENT_ID:
             return {"status": "unavailable",
                     "message": "The autonomous agent is not provisioned in this project, so autonomous "
@@ -4310,6 +4388,7 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             "input_data": input_data,
             "task_type": "scheduled_autonomous",
             "schedule_cron": schedule_cron,
+            "time_zone": _tz,
             "created_at": _now,
         })
         # The schedule's own execution doc stays status 'scheduled'; per-fire
@@ -4337,12 +4416,12 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             _job = scheduler_v1.Job(
                 name=_parent + "/jobs/" + _job_id,
                 schedule=schedule_cron,
-                time_zone="Asia/Tokyo",
+                time_zone=_tz,
                 pubsub_target=scheduler_v1.PubsubTarget(topic_name=_topic_path, data=_payload),
             )
             _created = _sched_client.create_job(parent=_parent, job=_job)
             _job_name = _created.name
-            _logging.warning("Created Cloud Scheduler job for autonomous schedule: " + _job_name)
+            _logging.warning("Created Cloud Scheduler job for autonomous schedule (" + _tz + "): " + _job_name)
         except Exception as _e:
             _logging.error("Failed to create autonomous scheduler job: " + str(_e))
             return {"status": "partial", "schedule_id": _sched_id,
@@ -4352,8 +4431,9 @@ if os.environ.get("ENABLE_MANAGED_AGENT") == "1":
             "schedule_id": _sched_id,
             "task_name": task_name,
             "schedule": schedule_cron,
+            "time_zone": _tz,
             "job_name": _job_name,
-            "message": "Autonomous schedule registered (timezone Asia/Tokyo). Each fire runs in the sandbox "
+            "message": "Autonomous schedule registered (timezone " + _tz + "). Each fire runs in the sandbox "
                        "even while the user is offline; progress and completion are announced automatically "
                        "on the user's next message. Tell the user this, including the schedule in plain words.",
         }

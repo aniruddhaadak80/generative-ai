@@ -2432,6 +2432,7 @@ Zizu
 zmin
 zola
 Zom
+zoneinfo
 Zoomably
 Zosyn
 Zscaler
